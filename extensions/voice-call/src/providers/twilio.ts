@@ -62,6 +62,9 @@ export class TwilioProvider implements VoiceCallProvider {
   /** Map of call SID to stream SID for media streams */
   private callStreamMap = new Map<string, string>();
 
+  /** Map of stream SID to abort controller for TTS interruption */
+  private ttsAbortMap = new Map<string, AbortController>();
+
   /** Storage for TwiML content (for notify mode with URL-based TwiML) */
   private readonly twimlStorage = new Map<string, string>();
   /** Track notify-mode calls to avoid streaming on follow-up callbacks */
@@ -132,7 +135,23 @@ export class TwilioProvider implements VoiceCallProvider {
   }
 
   unregisterCallStream(callSid: string): void {
+    const streamSid = this.callStreamMap.get(callSid);
+    if (streamSid) {
+      this.ttsAbortMap.delete(streamSid);
+    }
     this.callStreamMap.delete(callSid);
+  }
+
+  /**
+   * Abort any ongoing TTS for a stream (barge-in support).
+   */
+  abortTts(streamSid: string): void {
+    const controller = this.ttsAbortMap.get(streamSid);
+    if (controller) {
+      console.log(`[twilio] Aborting TTS for stream ${streamSid}`);
+      controller.abort();
+      this.ttsAbortMap.delete(streamSid);
+    }
   }
 
   /**
@@ -505,22 +524,44 @@ export class TwilioProvider implements VoiceCallProvider {
       throw new Error("TTS provider and media stream handler required");
     }
 
-    // Generate audio with OpenAI TTS (returns mu-law at 8kHz)
-    const muLawAudio = await this.ttsProvider.synthesizeForTwilio(text);
-
-    // Stream audio in 20ms chunks (160 bytes at 8kHz mu-law)
-    const CHUNK_SIZE = 160;
-    const CHUNK_DELAY_MS = 20;
-
-    for (const chunk of chunkAudio(muLawAudio, CHUNK_SIZE)) {
-      this.mediaStreamHandler.sendAudio(streamSid, chunk);
-
-      // Pace the audio to match real-time playback
-      await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY_MS));
+    // Abort any prior playback on this stream before starting a new one.
+    const existingController = this.ttsAbortMap.get(streamSid);
+    if (existingController) {
+      existingController.abort();
     }
 
-    // Send a mark to track when audio finishes
-    this.mediaStreamHandler.sendMark(streamSid, `tts-${Date.now()}`);
+    const abortController = new AbortController();
+    this.ttsAbortMap.set(streamSid, abortController);
+
+    try {
+      // Generate audio with OpenAI TTS (returns mu-law at 8kHz)
+      const muLawAudio = await this.ttsProvider.synthesizeForTwilio(text);
+
+      // Stream audio in 20ms chunks (160 bytes at 8kHz mu-law)
+      const CHUNK_SIZE = 160;
+      const CHUNK_DELAY_MS = 20;
+
+      for (const chunk of chunkAudio(muLawAudio, CHUNK_SIZE)) {
+        // Check for abort before sending each chunk
+        if (abortController.signal.aborted) {
+          console.log(`[twilio] TTS aborted for stream ${streamSid}`);
+          return;
+        }
+
+        this.mediaStreamHandler.sendAudio(streamSid, chunk);
+
+        // Pace the audio to match real-time playback
+        await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY_MS));
+      }
+
+      // Send a mark to track when audio finishes
+      this.mediaStreamHandler.sendMark(streamSid, `tts-${Date.now()}`);
+    } finally {
+      // Only clear if we are still the latest controller for this stream.
+      if (this.ttsAbortMap.get(streamSid) === abortController) {
+        this.ttsAbortMap.delete(streamSid);
+      }
+    }
   }
 
   /**

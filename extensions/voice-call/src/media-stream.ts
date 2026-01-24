@@ -27,6 +27,8 @@ export interface MediaStreamConfig {
   onTranscript?: (callId: string, transcript: string) => void;
   /** Callback for partial transcripts (streaming UI) */
   onPartialTranscript?: (callId: string, partial: string) => void;
+  /** Callback when speech starts (barge-in detection) */
+  onSpeechStarted?: (callId: string, streamSid: string) => void;
   /** Callback when stream connects */
   onConnect?: (callId: string, streamSid: string) => void;
   /** Callback when stream disconnects */
@@ -146,6 +148,11 @@ export class MediaStreamHandler {
 
     sttSession.onTranscript((transcript) => {
       this.config.onTranscript?.(callSid, transcript);
+    });
+
+    // Set up barge-in detection (clear audio when user starts speaking)
+    sttSession.onSpeechStarted(() => {
+      this.config.onSpeechStarted?.(callSid, streamSid);
     });
 
     const session: StreamSession = {

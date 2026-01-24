@@ -112,6 +112,15 @@ export class VoiceCallWebhookServer {
       onPartialTranscript: (callId, partial) => {
         console.log(`[voice-call] Partial for ${callId}: ${partial}`);
       },
+      onSpeechStarted: (callId, streamSid) => {
+        console.log(`[voice-call] Barge-in detected for ${callId}, clearing audio`);
+        // Abort ongoing TTS generation
+        if (this.provider.name === "twilio") {
+          (this.provider as TwilioProvider).abortTts(streamSid);
+        }
+        // Clear any queued TTS audio when user starts speaking
+        this.mediaStreamHandler?.clearAudio(streamSid);
+      },
       onConnect: (callId, streamSid) => {
         console.log(
           `[voice-call] Media stream connected: ${callId} -> ${streamSid}`,
